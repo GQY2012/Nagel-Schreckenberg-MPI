@@ -1,156 +1,156 @@
+
 #include <iostream>
-#include <time.h>
-#include <mpi.h>
-#include <Windows.h>
+#include <ctime>
+#include "mpi.h"
 
-#define vmax 15
-#define p 0.25
-#define carnum 10000
-#define clocknum 2000
 
-typedef struct Car {
-	int position = 0;
-	int v = 0;
-}Car;
+#define VMAX 15				//最大速度
+#define P 0.25				//减速概率
 
-int getd(Car *car, int index) {
-	int min_d = INT_MAX;
-	for (int i = 0;i < carnum;i++) {
-		if (i == index)
-			continue;
-		if ((*(car + index)).position < (*(car + i)).position) {
-			int d = (*(car + i)).position - (*(car + index)).position;
-			min_d = min_d > d ? d : min_d;
-		}
+int clocknum = 2000;		//周期数
+int carnum = 100000;		//车的数量
+int positionnum;			//道路的估计长度
+int *position;				// i车当前的位置
+int *oldposition;			// i车之前的位置
+int *carnum_in_position;    // 道路i位置处车的数量
+int *velocity;				// i车的速度
+
+int myid, numprocs;
+int countn = 0;
+double starttime, endtime;
+double t1, t2;
+
+void updateVelocityPosition(int index){
+	int distance = 1;
+	int v = velocity[index];
+	while (distance <= VMAX)
+	{
+		if (carnum_in_position[position[index] + distance] > 0)
+			break;
+		distance++;
 	}
-	return min_d;
+	// 前面没车++
+	if (distance > v && velocity[index] < VMAX)
+		velocity[index]++;
+	// 前面有车,d <= v, v = d-1;
+	else if (distance <= v)
+		velocity[index] = distance - 1;
+	// 按概率--
+	if (rand() / (double)RAND_MAX <= P)
+		velocity[index]--;
+	// 保证>=0
+	if (velocity[index] < 0)
+		velocity[index] = 0;
+	position[index] += velocity[index];
 }
 
-int main(int argc, char *argv[])
+// 处理carnum_in_position,更新oldposition
+void updateCarnum_in_position()
 {
-	int myid, numprocs;
-	int n = carnum;
-	int countn = 0;
-	double starttime, endtime;
-	double t1, t2;
+	for (int i = 0; i < carnum; i++) {
+		carnum_in_position[oldposition[i]] --;
+		carnum_in_position[position[i]] ++;
+		oldposition[i] = position[i];
+	}
+}
 
-	Car *car = new Car[carnum];
-	Car *newcar = new Car[carnum];
+// 输出carnum_in_position
+void printCarnum_in_position(int cycle) {
+	std::cout << "cycle: " << cycle << std::endl;
+	for (int i = 0; i < positionnum; i++)
+		if (carnum_in_position[i] > 0)
+			std::cout << "carnum_in_position[" << i << "]: " << carnum_in_position[i] << std::endl;
+}
+
+void printposition() {
+	for (int i = 0; i < carnum; i++){
+		std::cout << i << ":" << position[i] << " " << velocity[i] << std::endl;
+	}
+}
+
+
+int main(int argc, char **argv)
+{
+	positionnum = clocknum * VMAX;
+	position = new int[carnum];
+	oldposition = new int[carnum];
+	carnum_in_position = new int[positionnum];
+	velocity = new int[carnum];
 	srand((unsigned)time(NULL));
 
 	MPI_Init(&argc, &argv);
 	MPI_Comm_rank(MPI_COMM_WORLD, &myid);
 	MPI_Comm_size(MPI_COMM_WORLD, &numprocs);
+	MPI_Bcast(&carnum, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-	if (myid == 0) {
+	for (int i = (carnum + numprocs - 1) / numprocs * myid; 
+		i < (carnum + numprocs - 1) / numprocs * (myid + 1) && i < carnum; i++){
+		position[i] = 0;
+		oldposition[i] = 0;
+		velocity[i] = 0;
+	}
+	for (int i = (positionnum + numprocs - 1) / numprocs * myid; 
+		i < (positionnum + numprocs - 1) / numprocs * (myid + 1) && i < positionnum; i++)
+		carnum_in_position[i] = 0;
+	carnum_in_position[0] = carnum;
+	for (int i = 0; i < numprocs; i++) {
+		MPI_Bcast(&position[(carnum + numprocs - 1) / numprocs * i],
+			(carnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+		MPI_Bcast(&oldposition[(carnum + numprocs - 1) / numprocs * i], 
+			(carnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+		MPI_Bcast(&velocity[(carnum + numprocs - 1) / numprocs * i], 
+			(carnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+		MPI_Bcast(&carnum_in_position[(positionnum + numprocs - 1) / numprocs * i], 
+			(positionnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+	}
+
+	if (myid == 0)
 		starttime = MPI_Wtime();
+
+	for (int j = 0; j < clocknum; j++){
+		for (int i = (carnum + numprocs - 1) / numprocs * myid;
+			i < (carnum + numprocs - 1) / numprocs * (myid + 1) && i < carnum; i++) {
+			updateVelocityPosition(i);
+		}
+
+		for (int i = 0; i < numprocs; i++) {
+			MPI_Bcast(&velocity[(carnum + numprocs - 1) / numprocs * i],
+				(carnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+			MPI_Bcast(&position[(carnum + numprocs - 1) / numprocs * i],
+				(carnum + numprocs - 1) / numprocs, MPI_INT, i, MPI_COMM_WORLD);
+		}
+
+		updateCarnum_in_position();
 	}
 
-	for (int j = 0;j < clocknum;j++) {
-
-		MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD);
-		for (int i = myid;i < n;i += numprocs) {
-			int d = getd(car, i);
-			if (d != INT_MAX) {//前面有车
-				if (d <= (*(car + i)).v) {
-					(*(newcar + i)).v = d - 1;
-				}
-				else {
-					(*(newcar + i)).v = (*(car + i)).v + 1;//仍然加速
-				}
-			}
-			else {//前面没车
-				if ((*(car + i)).v == vmax) {
-					(*(newcar + i)).v = (*(car + i)).v;
-				}
-				else {
-					(*(newcar + i)).v = (*(car + i)).v + 1;
-				}
-			}
-			if (1 == rand() % 4) {
-				if ((*(newcar + i)).v > 0)
-					(*(newcar + i)).v--;
-			}
-			(*(newcar + i)).position = (*(car + i)).position + (*(newcar + i)).v;
-		}
-		MPI_Barrier(MPI_COMM_WORLD);//进程同步
-		if (myid == 0) {
-			Car *temp = car;
-			car = newcar;
-			newcar = temp;
-			
-//			for (int i = 0;i < carnum;i++) {
-//			std::cout << (*(car + i)).position << " " << (*(car + i)).v << " " << getd(car, i) << std::endl;
-//			}
-//			std::cout << "-----------------" << std::endl;
-//			std::cout << countn++ << std::endl;
-		}
-	}
-	MPI_Barrier(MPI_COMM_WORLD);//进程同步
-	if (myid == 0) {
+	if (myid == 0){
+		printCarnum_in_position(clocknum);
+		printposition();
 		endtime = MPI_Wtime();
 		t1 = endtime - starttime;
-	//	std::cout << "-----------------" << std::endl;
-	//	for (int i = 0;i < carnum;i++) {
-	//		std::cout << (*(car + i)).position << " " << (*(car + i)).v << std::endl;
-	//	}
+		std::cout << "并行时间 = " << t1 << std::endl;
 	}
-
+/*
 	if (myid == 0) {
-		Car *car = new Car[carnum];
-		Car *newcar = new Car[carnum];
-		srand((unsigned)time(NULL));
-		int countn = 0;
+		memset(position, 0, carnum);
+		memset(oldposition, 0, carnum);
+		memset(carnum_in_position, 0, positionnum);
+		memset(velocity, 0, carnum);
 		starttime = MPI_Wtime();
-		for (int j = 0;j < clocknum;j++) {
-			for (int i = 0;i < carnum;i++) {
-				int d = getd(car, i);
-				if (d != INT_MAX) {//前面有车
-					if (d <= (*(car + i)).v) {
-						(*(newcar + i)).v = d - 1;
-					}
-					else {
-						(*(newcar + i)).v = (*(car + i)).v + 1;//仍然加速
-					}
-				}
-				else {//前面没车
-					if ((*(car + i)).v == vmax) {
-						(*(newcar + i)).v = (*(car + i)).v;
-					}
-					else {
-						(*(newcar + i)).v = (*(car + i)).v + 1;
-					}
-				}
-				if (1 == rand() % 4) {
-					if ((*(newcar + i)).v > 0)
-						(*(newcar + i)).v--;
-				}
-
-				(*(newcar + i)).position = (*(car + i)).position + (*(newcar + i)).v;
+		for (int j = 0; j < clocknum; j++) {
+			for (int i = 0; i < carnum; i++) {
+				updateVelocityPosition(i);
 			}
-			Car *temp = car;
-			car = newcar;
-			newcar = temp;
-			//		for (int i = 0;i < carnum;i++) {
-			//			std::cout << (*(car + i)).position << " " << (*(car + i)).v << " " << getd(car, i) << std::endl;
-			//		}
-			//		std::cout << "-----------------" << std::endl;
-			//std::cout << countn++ << std::endl;
+			updateCarnum_in_position();
 		}
-		
 		endtime = MPI_Wtime();
 		t2 = endtime - starttime;
-
-		//std::cout << "-----------------" << std::endl;
-		//for (int i = 0;i < carnum;i++) {
-		//	std::cout << (*(car + i)).position << " " << (*(car + i)).v << std::endl;
-		//}
-
-		printf("并行时间：%fs\n", t1);
-		printf("串行时间：%fs\n", t2);
-		printf("加速比：%f\n", t2 / t1);
+		std::cout << "串行时间 = " << t2 << std::endl;
+		std::cout << "加速比 = " << t2/t1 << std::endl;
 	}
-
+*/
 	MPI_Finalize();
 	return 0;
 }
+
+
